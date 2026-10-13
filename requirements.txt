@@ -1,0 +1,7 @@
+numpy
+numba
+sounddevice
+scipy
+pillow
+mido
+python-rtmidi

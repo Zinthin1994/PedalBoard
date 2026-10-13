@@ -1,0 +1,19 @@
+# personal data - never published
+settings*.json
+presets*.json
+*.smoke
+pedalboard-error.log
+
+# updater working folders
+update/
+backup/
+dist/
+
+# archived older versions
+old/
+
+# generated
+__pycache__/
+*.nbi
+*.nbc
+tests/out*/
