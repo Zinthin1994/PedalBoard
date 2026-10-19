@@ -1,7 +1,8 @@
 ﻿# PedalBoard v4
 
-A guitar pedalboard for Windows, built for the Focusrite Scarlett Solo - v3's board (33 effects, amp sim,
-looper, drum machine, recorder, presets, PC-audio mixing) plus tools for **finding and understanding a tone**.
+A guitar pedalboard for Windows, built for the Focusrite Scarlett Solo - v3's board (34 effects, amp sim,
+looper, drum machine, recorder, presets, PC-audio mixing) plus a proper cabinet section, more amps and two
+switchable boards.
 
 v4 lives in its own folder (`PedalBoard_v4`) and its own settings (`settings_v4.json`, seeded from your v3
 settings on first run). v3 is untouched. Auto-update is disabled in v4.
@@ -17,20 +18,18 @@ settings on first run). v3 is untouched. Auto-update is disabled in v4.
   These are *models*, not captures of specific commercial cabinets.
 - Placement: cabinet *after the amp* or *at the end*. This only changes the sound for non-linear / modulated
   blocks after the amp (compressor, modulation, distortion); delay, reverb and EQ are linear and commute.
-- Cab settings are saved in presets. 11 complete rigs (`Rig: ...`) appear at the end of the preset list.
+- Every preset sets its cabinet: the built-in presets each have a matching cab (`rigs_v4.PRESET_CABS`), presets
+  you save store the cab you're using, and an older preset without one gets a cab to suit its amp / pedals.
+  Boards with an amp put the cab right after it; boards without one put it at the end.
+- 12 extra presets with the new amp voicings and cabs (Blackface Clean, Plexi Crunch, Modern High-Gain, ...)
+  appear at the end of the preset list, so MIDI program numbers of the older presets don't move.
 
-**Learn / explore**
-- Live spectrum strip (input vs output, 1/6-octave, named bands, hover read-out). With audio stopped it
-  analyses a built-in test riff through your board, so it works without a guitar.
-- **Tone Lab** window:
-  - *Chain*: renders a test guitar through every block - level in/out, gain change, peak, and the spectrum
-    before/after the selected block. Plus the **flow check** (rule-based review of pedal order, levels, cab).
-  - *Learn*: what each block does, where it goes, technique, controls, glossary, cabinet/mic notes.
-    The (i) on every pedal opens its page.
-  - *Match a tone*: load a recording; PedalBoard fits cabinet/mic, amp tone controls, low/high cut and a
-    6-band EQ so your board's output spectrum lands on it (offline, ~1 min). Your previous sound goes to B.
-- A/B compare, named Snapshots, **Auto level** (sets input gain for ~-12 dBFS peaks), latency read-out with
-  ASIO guidance.
+**Boards**
+- **BOARDS A / B** (under the header): two complete boards - pedals, order, every setting, amp, cabinet, input
+  and master level - that you flip between with one click. The first click on B copies the board you are on;
+  change it (or load a preset into it), then switch freely. Both boards are remembered when you close the app.
+- **Auto level** (left panel): sets the input gain for ~-12 dBFS peaks. A latency read-out with ASIO guidance
+  sits next to it.
 
 ## Running
 
@@ -40,16 +39,15 @@ settings on first run). v3 is untouched. Auto-update is disabled in v4.
 
 ## Tests
 
-    python tests/offline_test_v4.py     # amps, cabs, placement, analysis, flow rules, tone matching
+    python tests/offline_test_v4.py     # amp voicings, cabs, level matching, placement
     python tests/offline_test_v2.py     # every pedal alone + full boards (from v2)
 
 ## Code layout (v4 additions)
 
 | File | What |
 |---|---|
-| `app_v4.py` | the app: cabinet panel, tone bar, A/B, snapshots, analyzer plumbing, matching |
-| `lab_v4.py` | Tone Lab window + the spectrum view |
-| `analysis_v4.py` | spectra, offline `Probe` engine, per-block report, flow rules, tone matcher |
+| `app_v4.py` | the app: cabinet panel, BOARDS A/B, auto level, latency card |
 | `irlib_v4.py` | synthesized cabinet / mic / room impulse responses |
-| `rigs_v4.py`, `tonehelp_v4.py` | built-in rigs; learn-tab text |
-| `dsp_v2.py`, `engine_v2.py`, `pedals_v2.py` | core engine (v4 adds amp voicings, cab placement, IR tools, analyzer taps) |
+| `rigs_v4.py` | cabinets for the built-in presets, v4's extra presets, default cab for presets without one |
+| `dsp_v2.py`, `engine_v2.py`, `pedals_v2.py` | core engine (v4 adds amp voicings, cab placement and IR tools) |
+| `tests/probe_v4.py` | offline engine + test riff used by the tests |

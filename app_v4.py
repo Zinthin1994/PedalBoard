@@ -1,11 +1,10 @@
-"""PedalBoard v4 - v3's board plus the tools for finding and understanding a tone.
+"""PedalBoard v4 - v3's board plus a real cabinet section, more amps and two switchable boards.
 
   * Cabinet: synthesized speaker/mic library (or your own IR files), mic type / position / distance /
     blend / room, placeable right after the amp.  Cab settings are stored in presets.
   * 8 amp voicings and a set of complete rigs (presets: "Rig: ...").
-  * Live spectrum analyzer (input vs output, reference overlay, cab response) and a Tone Lab window:
-    per-block level / spectrum inspector, signal-flow check, learn tab, reference-tone matching.
-  * A/B compare, named snapshots, auto input level, latency read-out.
+  * BOARDS A / B: two complete boards to flip between; both are remembered between sessions.
+  * Auto input level and a latency read-out.
 
 Run:  pythonw app_v4.py   (PedalBoard.bat does this through launch.py)
 """
@@ -13,10 +12,7 @@ import copy
 import json
 import math
 import os
-import queue
-import shutil
 import sys
-import threading
 import time
 import traceback
 import tkinter as tk
@@ -24,20 +20,17 @@ from tkinter import messagebox, simpledialog, ttk
 
 import numpy as np
 
-import analysis_v4 as A
 import app_v2
 import app_v3
 import irlib_v4 as IRL
-import lab_v4
 import rigs_v4
 import updater
 import widgets_v3 as W
 from widgets_v3 import (BG, DIM, GOLD, TEXT, CButton, CKnob, CMeter, CSegmented, CText, CTuner, CCheck,
-                        CFootswitch, ClipLed, PillButton, is_light, shade)
+                        CFootswitch, ClipLed, PillButton)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_V4 = os.path.join(HERE, "settings_v4.json")
-SNAP_FILE = os.path.join(HERE, "snapshots_v4.json")
 IR_DIR = os.path.join(HERE, "irs")
 LOG_FILE = os.path.join(HERE, "pedalboard-error.log")
 app_v2.SETTINGS_FILE = SETTINGS_V4
@@ -48,7 +41,6 @@ SIDE_L = 178
 SIDE_R = 216
 MIC_SHORT = ["DYN", "RIB", "COND"]
 DEFAULT_CAB = rigs_v4.cab("4x12 Closed British", "DYNAMIC", 0.2, 0.2, 0.0, 0.05)
-STRIP_H = 88
 PANEL_H = 590          # the side panels scroll (mouse wheel) if the window is shorter than this
 
 
@@ -60,37 +52,13 @@ def log_error(where):
         pass
 
 
-class PedalView(app_v3.PedalView):
-    """v3's pedal plus an (i) button that opens its page in the Learn tab."""
-
-    def __init__(self, app, key):
-        super().__init__(app, key)
-        ped = app.PD.BY_KEY[key]
-        light = is_light(ped.color)
-        fill = shade(ped.color, 0.8) if light else shade(ped.color, 1.28)
-        CButton(app.canvas, app_v3.PW - 103, 14, "i", lambda: app.show_help(key), fill=fill, fg=ped.text, h=16,
-                w=21, font=("Segoe UI", 8, "bold"), tags=(self.tag, "pedal"))
-
-
 class App(app_v3.App):
     def __init__(self, root, engine_mod):
         self.cab = dict(DEFAULT_CAB)
-        self.lab = None
-        self.probe = None
-        self.ref = None
         self.ab = {"cur": "A", "A": None, "B": None}
+        self._board_text = None
         self._cab_job = None
-        self._spec = {"in": None, "out": None, "state": None, "ref": None}
         self.auto = None
-        self.match_q = queue.Queue()
-        self.matching = False
-        self.report = None
-        self.sel_block = None
-        self.flow = []
-        self._pin = 0.0
-        self._clip_tick = -999
-        self.strip_open = True
-        self.snapshots = {}
         super().__init__(root, engine_mod)
         self._init_v4()
 
@@ -117,31 +85,21 @@ class App(app_v3.App):
             cab["cab"] = "file:" + s["ir_path"]               # carry a v3 IR over
         self.cab = cab
         self.glob.setdefault("cabpos", 1)
-        self.snapshots = app_v2.load_json(SNAP_FILE, {})
-        self.strip_open = bool(s.get("strip_open", True))
-        orig = self.engine.read_meters
-
-        def read_meters():
-            pin, pout, clips = orig()
-            self._pin = max(self._pin * 0.97, pin)
-            if clips:
-                self._clip_tick = self.tick_n
-            return pin, pout, clips
-        self.engine.read_meters = read_meters
         self.apply_cab()
-        self._apply_strip()
-        self.ab["A"] = self.capture_state()
+        self._load_boards()
         self._update_ab_buttons()
 
     # ================================================================ presets / state
     def _all_presets(self):
-        return {**app_v2.BUILTIN_PRESETS, **self.user_presets, **rigs_v4.RIGS}   # keeps MIDI program numbers
+        builtin = {n: {**p, "cab": rigs_v4.PRESET_CABS[n]} if n in rigs_v4.PRESET_CABS else p
+                   for n, p in app_v2.BUILTIN_PRESETS.items()}
+        return {**builtin, **self.user_presets, **rigs_v4.RIGS}   # this order keeps MIDI program numbers
 
     def load_preset(self, name):
         p = self._all_presets().get(name)
         super().load_preset(name)
-        if p and p.get("cab"):
-            self.apply_cab(p["cab"])
+        if p:
+            self.apply_cab(rigs_v4.with_cab(p)["cab"])          # every preset sets its cabinet
 
     def save_preset(self):
         name = simpledialog.askstring("Save preset", "Preset name:", parent=self.root)
@@ -169,61 +127,62 @@ class App(app_v3.App):
         self.preset_var.set(st.get("preset", ""))
         self.apply_cab(st.get("cab"))
 
-    # ---- A/B
+    # ---- BOARDS: two complete boards (pedals, order, settings, amp, cab, levels) to flip between
     def ab_switch(self, which):
         if which == self.ab["cur"]:
             return
         self.ab[self.ab["cur"]] = self.capture_state()
-        if self.ab[which] is None:
-            self.ab[which] = copy.deepcopy(self.ab[self.ab["cur"]])      # start the new slot from this sound
+        fresh = self.ab[which] is None
+        if fresh:
+            self.ab[which] = copy.deepcopy(self.ab[self.ab["cur"]])      # start the new board from this one
         self.ab["cur"] = which
         self.restore_state(copy.deepcopy(self.ab[which]))
         self._update_ab_buttons()
+        self.status.configure(text=f"Board {which} - started as a copy of the other board; change it, then flip "
+                                   "between A and B." if fresh else f"Board {which}")
+        self.hold_status = self.tick_n + 100
 
     def _update_ab_buttons(self):
         for k, b in (("A", self.ab_a), ("B", self.ab_b)):
             on = self.ab["cur"] == k
             b.configure(bg=GOLD if on else "#3a3a42", fg="#111" if on else TEXT)
+        self._update_board_label()
 
-    def keep_before_change(self):
-        """Put the current sound in slot B (so the next sound, in A, can be compared with it)."""
-        self.ab["B"] = self.capture_state()
-        self.ab["cur"] = "A"
-        self._update_ab_buttons()
+    def _update_board_label(self):
+        def name(k):
+            if k == self.ab["cur"]:
+                n = self.preset_var.get()
+            elif self.ab[k] is None:
+                return "empty"
+            else:
+                n = self.ab[k].get("preset", "")
+            n = n or "custom"
+            return n if len(n) <= 24 else n[:23] + "…"
+        text = f"A: {name('A')}     B: {name('B')}"
+        if text != self._board_text:
+            self._board_text = text
+            self.board_lbl.configure(text=text)
 
-    # ---- snapshots
-    def snapshot_menu(self):
-        m = tk.Menu(self.root, tearoff=0, bg="#24242a", fg=TEXT, activebackground=GOLD, activeforeground="#111",
-                    font=("Segoe UI", 9))
-        m.add_command(label="Save current sound as snapshot…", command=self.snapshot_save)
-        if self.snapshots:
-            m.add_separator()
-            for n in self.snapshots:
-                m.add_command(label=n, command=lambda n=n: self.snapshot_load(n))
-            m.add_separator()
-            d = tk.Menu(m, tearoff=0, bg="#24242a", fg=TEXT, activebackground="#c62828", font=("Segoe UI", 9))
-            for n in self.snapshots:
-                d.add_command(label=n, command=lambda n=n: self.snapshot_delete(n))
-            m.add_cascade(label="Delete snapshot", menu=d)
-        b = self.snap_btn
-        m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+    def _load_boards(self):
+        """Restore both boards saved at the last close. The live board is the current slot."""
+        saved = self.settings.get("boards_v4") or {}
+        cur = saved.get("cur") if saved.get("cur") in ("A", "B") else "A"
+        other = "B" if cur == "A" else "A"
+        st = saved.get(other)
+        ok = isinstance(st, dict) and isinstance(st.get("board"), list) and isinstance(st.get("values"), dict)
+        mine = saved.get(cur)
+        if (not self.preset_var.get() and isinstance(mine, dict) and mine.get("board") == self.board
+                and mine.get("preset") in self._all_presets()):
+            self.preset_var.set(mine["preset"])                 # the board is unchanged since that preset
+        self.ab = {"cur": cur, cur: self.capture_state(), other: st if ok else None}
 
-    def snapshot_save(self):
-        name = simpledialog.askstring("Snapshot", "Name this sound:", parent=self.root,
-                                      initialvalue=time.strftime("Tone %H:%M"))
-        if name:
-            self.snapshots[name] = self.capture_state()
-            app_v2.save_json(SNAP_FILE, self.snapshots)
-
-    def snapshot_load(self, name):
-        st = self.snapshots.get(name)
-        if st:
+    def _save_boards(self):
+        try:
             self.ab[self.ab["cur"]] = self.capture_state()
-            self.restore_state(copy.deepcopy(st))
-
-    def snapshot_delete(self, name):
-        self.snapshots.pop(name, None)
-        app_v2.save_json(SNAP_FILE, self.snapshots)
+            self.settings["boards_v4"] = json.loads(json.dumps(
+                self.ab, default=lambda o: o.item() if hasattr(o, "item") else str(o)))
+        except Exception:   # noqa: BLE001
+            log_error("save boards")
 
     # ================================================================ header / tone bar
     def _build_header(self):
@@ -250,44 +209,22 @@ class App(app_v3.App):
         self.preset_box.pack(side="right", padx=4)
         self.preset_box.bind("<<ComboboxSelected>>", lambda e: self.load_preset(self.preset_var.get()))
         PillButton(f, "◀", lambda: self.step_preset(-1), minw=34).pack(side="right")
-        tk.Label(f, text="PRESET / RIG  ", bg=BG, fg=DIM, font=("Bahnschrift SemiBold", 9)).pack(side="right")
+        tk.Label(f, text="PRESET  ", bg=BG, fg=DIM, font=("Bahnschrift SemiBold", 9)).pack(side="right")
         self._refresh_presets()
 
-        # ---- tone bar: A/B, snapshots, lab, status chips
+        # ---- boards bar: two boards to flip between, latency chip
         bar = tk.Frame(self.root, bg=BG)
         bar.pack(fill="x", padx=16, pady=(0, 6))
         self.tonebar = bar
-        tk.Label(bar, text="COMPARE  ", bg=BG, fg=DIM, font=("Bahnschrift SemiBold", 9)).pack(side="left")
+        tk.Label(bar, text="BOARDS  ", bg=BG, fg=DIM, font=("Bahnschrift SemiBold", 9)).pack(side="left")
         self.ab_a = PillButton(bar, "A", lambda: self.ab_switch("A"), minw=34)
         self.ab_a.pack(side="left", padx=(0, 2))
         self.ab_b = PillButton(bar, "B", lambda: self.ab_switch("B"), minw=34)
         self.ab_b.pack(side="left", padx=(0, 10))
-        self.snap_btn = PillButton(bar, "Snapshots  ▾", self.snapshot_menu)
-        self.snap_btn.pack(side="left", padx=3)
-        PillButton(bar, "🔬  Tone Lab", lambda: self.open_lab(), bg="#2c4a6b").pack(side="left", padx=(10, 3))
-        self.strip_btn = PillButton(bar, "Spectrum  ▴", self.toggle_strip)
-        self.strip_btn.pack(side="left", padx=3)
-        self.flow_chip = tk.Label(bar, text="", bg=BG, fg=DIM, font=("Bahnschrift SemiBold", 9), cursor="hand2")
-        self.flow_chip.pack(side="right", padx=(10, 0))
-        self.flow_chip.bind("<Button-1>", lambda e: self.open_lab(tab=0))
+        self.board_lbl = tk.Label(bar, text="", bg=BG, fg=DIM, font=("Segoe UI", 9))
+        self.board_lbl.pack(side="left", padx=4)
         self.lat_chip = tk.Label(bar, text="", bg=BG, fg=DIM, font=("Bahnschrift SemiBold", 9))
         self.lat_chip.pack(side="right", padx=(10, 0))
-
-        self.strip_frame = tk.Frame(self.root, bg=BG)
-        self.strip = lab_v4.SpectrumView(self.strip_frame, height=STRIP_H)
-        self.strip.pack(fill="both", expand=True)
-        self.strip_frame.pack(fill="x", padx=16, pady=(0, 4))
-
-    def toggle_strip(self):
-        self.strip_open = not self.strip_open
-        self._apply_strip()
-
-    def _apply_strip(self):
-        if self.strip_open:
-            self.strip_frame.pack(fill="x", padx=16, pady=(0, 4), after=self.tonebar)
-        else:
-            self.strip_frame.pack_forget()
-        self.strip_btn.configure(text="Spectrum  ▴" if self.strip_open else "Spectrum  ▾")
 
     # ================================================================ main area
     def _build_main(self):
@@ -361,17 +298,6 @@ class App(app_v3.App):
         for cv in (left, right):
             cv.configure(scrollregion=(0, 0, cv.winfo_reqwidth(), PANEL_H), yscrollincrement=20)
         self.right_cv = right
-
-    def _panel(self, key):
-        if key not in self.panels:
-            self.panels[key] = PedalView(self, key)
-            self._sync_panel(key)
-        return self.panels[key]
-
-    def _regrid(self):
-        super()._regrid()
-        if self.lab is not None:
-            self.lab.fill_help_choices()
 
     def _side_bg(self, cv, w, h):
         super()._side_bg(cv, w, max(h, PANEL_H))
@@ -613,256 +539,6 @@ class App(app_v3.App):
         cv.itemconfigure(self.lat_sub, text=tip, fill=DIM)
         self.lat_chip.configure(text=f"latency {tot:.0f} ms", fg=col)
 
-    # ================================================================ spectrum / lab plumbing
-    def _get_probe(self):
-        if self.probe is None or self.probe.sr != self.engine.sr:
-            self.probe = A.Probe(self.engine.sr)
-        self.probe.sync_from(self.engine)
-        return self.probe
-
-    def _state_key(self):
-        e = self.engine
-        n = int(e.G[self.D.G_IR_LEN])
-        return (tuple(self.board), hash(e.P.tobytes()), hash(e.G.tobytes()), hash(e.IR[:n].tobytes()), e.sr)
-
-    def spectrum_options_changed(self):
-        self._spec.update({"in": None, "out": None, "state": None})
-
-    def _opts(self):
-        lab = self.lab
-        if lab is None:
-            return dict(inp=True, out=True, ref=True, cab=False, tilt=3.0, src="auto")
-        return dict(inp=lab.v_in.get(), out=lab.v_out.get(), ref=lab.v_ref.get(), cab=lab.v_cab.get(),
-                    tilt=3.0 if lab.v_tilt.get() else 0.0, src=lab.src_var.get())
-
-    @staticmethod
-    def _blend(old, new):
-        if new is None:
-            return old
-        if old is None or len(old[1]) != len(new[1]):
-            return new
-        return new[0], 0.6 * old[1] + 0.4 * new[1]
-
-    def _update_spectrum(self):
-        o = self._opts()
-        e = self.engine
-        sr = e.sr
-        msg = ""
-        live = e.running and o["src"] == "auto"
-        sel = self.sel_block
-        if sel and self.report:
-            row = next((r for r in self.report if r["key"] == sel), None)
-            curves = []
-            if row:
-                if row["spec_in"] is not None:
-                    curves.append(dict(name="block in", f=row["spec_in"][0], db=row["spec_in"][1], color="#8b8b96",
-                                       dash=(4, 3)))
-                if row["spec_out"] is not None:
-                    curves.append(dict(name="block out", f=row["spec_out"][0], db=row["spec_out"][1], color=GOLD))
-                if self.ref and o["ref"]:
-                    f, db = self.ref["spec3"]
-                    curves.append(dict(name="ref", f=f, db=db, color="#4fc3f7", aux=True, width=1))
-                self._push_curves(curves, f"{self.PD.BY_KEY[sel].title.title()}: spectrum before / after this block "
-                                          "(offline test riff)")
-                return
-        if live:
-            xin, xout = e.tuner_snapshot(), e.out_snapshot()
-            xin = xin * float(e.G[self.D.G_IN_GAIN])             # the input curve is what enters the first pedal
-            for name, x, floor in (("in", xin, -80.0), ("out", xout, -90.0)):
-                if A.level_db(x)[0] > floor:
-                    self._spec[name] = self._blend(self._spec[name], A.spectrum_db(x, sr, o["tilt"]))
-                else:
-                    self._spec[name] = None
-            if self._spec["in"] is None and self._spec["out"] is None:
-                msg = "waiting for signal - play something"
-            self._spec["state"] = None
-        else:
-            key = (self._state_key(), o["tilt"])
-            if key != self._spec["state"]:
-                try:
-                    pr = self._get_probe()
-                    sig = A.test_riff(sr, "chug")
-                    skip = int(0.3 * sr)
-                    L, R = pr.render(sig, skip=skip)
-                    self._spec["in"] = A.welch_db(sig[skip:] * float(e.G[self.D.G_IN_GAIN]), sr, o["tilt"])
-                    self._spec["out"] = A.welch_db(0.5 * (L + R), sr, o["tilt"])
-                    self._spec["state"] = key
-                except Exception:   # noqa: BLE001
-                    log_error("offline spectrum")
-                    self._spec["state"] = key
-            msg = "offline: test riff through your current board" if not e.running else ""
-        curves = []
-        if o["inp"] and self._spec["in"] is not None:
-            curves.append(dict(name="in", f=self._spec["in"][0], db=self._spec["in"][1], color="#8b8b96", width=1))
-        if o["out"] and self._spec["out"] is not None:
-            curves.append(dict(name="out", f=self._spec["out"][0], db=self._spec["out"][1], color=GOLD))
-        if self.ref and o["ref"]:
-            spec = self.ref["spec3"] if o["tilt"] else self.ref["spec0"]
-            curves.append(dict(name="ref", f=spec[0], db=spec[1], color="#4fc3f7", aux=True, width=2, dash=(5, 3)))
-        if o["cab"] and self.cab["mode"] == 2:
-            r = e.ir_response()
-            if r is not None:
-                curves.append(dict(name=None, f=r[0], db=r[1], color="#32d74b", aux=True, width=1))
-        self._push_curves(curves, msg)
-
-    def _push_curves(self, curves, msg):
-        if self.strip_open:
-            self.strip.set_curves(curves, msg if len(msg) < 90 else "")
-        if self.lab is not None:
-            self.lab.spec.set_curves(curves, msg)
-            self.lab.legend.configure(text=msg)
-
-    def open_lab(self, tab=None):
-        if self.lab is not None:
-            try:
-                self.lab.lift()
-                self.lab.focus_force()
-            except tk.TclError:
-                self.lab = None
-        if self.lab is None:
-            self.lab = lab_v4.ToneLab(self)
-            if self.ref:
-                self.lab.set_reference_label(f"{self.ref['name']} · {self.ref['secs']:.0f} s", ok=True)
-            self.refresh_flow(force=True)
-        if tab is not None:
-            self.lab.nb.select(tab)
-        return self.lab
-
-    def lab_closed(self):
-        self.lab = None
-        self.sel_block = None
-
-    def show_help(self, key):
-        self.open_lab().show_help(key)
-
-    def lab_block_selected(self, key):
-        self.sel_block = key
-
-    def analyze_chain(self):
-        lab = self.open_lab()
-        try:
-            pr = self._get_probe()
-            kind = "open" if lab.riff_var.get().startswith("Open") else "chug"
-            sig = A.test_riff(self.engine.sr, kind)
-            self.report = pr.stage_report(sig, list(self.board))
-            lab.set_report(self.report, self.board, self.engine.values)
-            lab.fill_help_choices()
-        except Exception as ex:   # noqa: BLE001
-            log_error("analyze chain")
-            self.status.configure(text=f"Analysis failed: {ex}")
-
-    def refresh_flow(self, force=False):
-        e = self.engine
-        recent_clip = self.tick_n - self._clip_tick < 90
-        self.flow = A.flow_warnings(self.board, e.values, self.glob, bool(self.glob.get("cabpos", 1)),
-                                    peak_in=self._pin, clips=1.0 if recent_clip else 0.0, running=e.running)
-        n_bad = sum(1 for w in self.flow if w[0] in ("bad", "warn"))
-        n_tip = len(self.flow) - n_bad
-        if n_bad:
-            self.flow_chip.configure(text=f"⚠ {n_bad} to check" + (f" · {n_tip} tips" if n_tip else ""),
-                                     fg="#ffb03a" if not any(w[0] == "bad" for w in self.flow) else "#ff5d52")
-        elif n_tip:
-            self.flow_chip.configure(text=f"✔ flow OK · {n_tip} tip" + ("s" if n_tip > 1 else ""), fg="#6cb8ff")
-        else:
-            self.flow_chip.configure(text="✔ signal flow OK", fg="#5dd36b")
-        if self.lab is not None:
-            self.lab.set_flow(self.flow)
-
-    # ================================================================ reference matching
-    def load_reference(self, path):
-        sr = self.engine.sr
-        try:
-            x = A.read_audio(path, sr)
-            s3, s0 = A.welch_db(x, sr, 3.0), A.welch_db(x, sr, 0.0)
-        except Exception as ex:   # noqa: BLE001
-            messagebox.showerror("Reference", f"Couldn't read that file:\n{ex}", parent=self.lab or self.root)
-            return
-        if s3 is None:
-            messagebox.showerror("Reference", "That file is silent.", parent=self.lab or self.root)
-            return
-        self.settings["ref_dir"] = os.path.dirname(path)
-        self.ref = {"path": path, "name": os.path.basename(path), "secs": len(x) / sr, "spec3": s3, "spec0": s0,
-                    "target": A.curve_on_bands(s3)}
-        if self.lab:
-            self.lab.set_reference_label(f"{self.ref['name']} · {self.ref['secs']:.0f} s", ok=True)
-        self.spectrum_options_changed()
-
-    def clear_reference(self):
-        self.ref = None
-        if self.lab:
-            self.lab.set_reference_label("no reference loaded")
-        self.spectrum_options_changed()
-
-    def start_match(self):
-        if self.matching:
-            return
-        lab = self.open_lab()
-        if self.ref is None:
-            lab.set_match_state(0, "Load a reference recording first.", False)
-            return
-        if not self.engine.values["amp"]["on"] or "amp" not in self.board:
-            self.add_pedal("amp")
-        for k in ("cut", "eq"):
-            if k not in self.board:
-                self.add_pedal(k)
-            self.set_param(k, "on", 1)
-            self._sync_panel(k)
-        self.keep_before_change()
-        self.matching = True
-        lab.set_match_state(0.0, "preparing…", True)
-        sr = self.engine.sr
-        probe = A.Probe(sr)
-        probe.sync_from(self.engine)
-        probe.set_board(list(self.board))
-        sig = A.test_riff(sr, "chug")
-        target = self.ref["target"]
-        fit_gain = bool(lab.fit_gain.get())
-        q = self.match_q
-
-        def work():
-            try:
-                res = A.match_tone(probe, target, sig, fit_gain=fit_gain,
-                                   progress=lambda f, t: q.put(("progress", f, t)))
-                q.put(("done", res))
-            except Exception as ex:   # noqa: BLE001
-                log_error("match")
-                q.put(("error", str(ex)))
-        threading.Thread(target=work, daemon=True).start()
-
-    def _poll_match(self):
-        try:
-            while True:
-                msg = self.match_q.get_nowait()
-                lab = self.lab
-                if msg[0] == "progress":
-                    if lab:
-                        lab.set_match_state(msg[1], msg[2], True)
-                elif msg[0] == "error":
-                    self.matching = False
-                    if lab:
-                        lab.set_match_state(0, f"Matching failed: {msg[1]}", False)
-                else:
-                    self.matching = False
-                    res = msg[1]
-                    for k, d in res["values"].items():
-                        for n, v in d.items():
-                            self.engine.set(k, n, v)
-                        self._sync_panel(k)
-                    self.cab.update(res["cab"])
-                    self.cab["mode"] = 2
-                    self.apply_cab()
-                    self.ab["A"] = self.capture_state()
-                    self.ab["cur"] = "A"
-                    self._update_ab_buttons()
-                    self.spectrum_options_changed()
-                    if lab:
-                        lab.set_match_state(
-                            1.0, f"Done. Spectral error {res['before']:.1f} dB → {res['after']:.1f} dB RMS "
-                                 f"(80 Hz-9 kHz).\nCabinet: {res['cab']['cab']}, {res['cab']['mic'].lower()} mic. "
-                                 "Amp tone controls, cut and EQ were set. Press B to hear what you had.", False)
-        except queue.Empty:
-            pass
-
     # ================================================================ periodic
     def _tick(self):
         try:
@@ -875,20 +551,13 @@ class App(app_v3.App):
         n = self.tick_n
         if self.auto:
             self._auto_level_tick()
-        if n % 2 == 0 and (self.strip_open or self.lab is not None):
-            self._update_spectrum()
         if n % 15 == 0:
             self._latency_update()
-        if n % 20 == 0:
-            self.refresh_flow()
-        if self.matching or not self.match_q.empty():
-            self._poll_match()
+            self._update_board_label()
 
     def on_close(self):
         self.settings["cab_v4"] = dict(self.cab)
-        self.settings["strip_open"] = self.strip_open
-        if self.lab is not None:
-            self.settings["lab_geometry"] = self.lab.geometry()
+        self._save_boards()
         super().on_close()
 
 

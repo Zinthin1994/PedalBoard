@@ -1,12 +1,11 @@
-"""Offline checks for PedalBoard v4: amp voicings, cabinet library + placement, analysis, flow rules, matching."""
+"""Offline checks for PedalBoard v4: amp voicings, cabinet library, level matching and cabinet placement."""
 import os
 import sys
-import time
 
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import analysis_v4 as A  # noqa: E402
+import probe_v4 as A  # noqa: E402
 import dsp_v2 as D  # noqa: E402
 import irlib_v4 as IRL  # noqa: E402
 from pedals_v2 import PEDALS  # noqa: E402
@@ -111,47 +110,12 @@ def main():
           f"max diff {np.abs(a - b).max():.2g}")
     check("cab placement output finite", np.isfinite(a).all() and np.isfinite(b).all())
 
-    # ---- per-block report
-    pr = fresh_probe(["gate", "od", "amp", "delay"], od={"drive": 20})
-    pr.eng.set_ir(IRL.make_cab("1x12 Open-back Vintage", sr=SR), "t")
-    pr.eng.G[D.G_CAB], pr.eng.G[D.G_CABPOS] = 2, 1
-    t0 = time.time()
-    rows = pr.stage_report(riff, ["gate", "od", "amp", "delay"])
-    check("stage report rows", len(rows) == 4 and all(r["spec_out"] is not None for r in rows),
-          f"{(time.time() - t0) * 1000:.0f} ms")
-    crest = lambda r: r["out_pk"] - r["out_rms"]  # noqa: E731
-    check("overdrive lowers the crest factor (clipping / compression)", crest(rows[1]) < crest(rows[0]) - 1,
-          f"{crest(rows[0]):.1f} -> {crest(rows[1]):.1f} dB")
-
-    # ---- flow rules
-    vals = {p.key: {"on": 1} for p in PEDALS}
-    vals["amp"].update(model=3, gain=0.8)
-    titles = [w[1] for w in A.flow_warnings(["mgate", "amp", "tboost", "delay"], vals, {"cab": 0}, False)]
-    check("flow: amp without cab", "Amp without a cabinet" in titles)
-    check("flow: metal gate before amp", "Metal Gate before the amp" in titles)
-    check("flow: tight boost after amp", "Tight Boost after the amp" in titles)
-    good = A.flow_warnings(["gate", "tboost", "amp", "mgate", "delay"], vals, {"cab": 2}, True)
-    check("flow: a sensible chain has no problems", not [w for w in good if w[0] in ("bad", "warn")],
-          str([w[1] for w in good]))
-
-    # ---- tone matching on a known target
-    pr = fresh_probe(["amp", "cut", "eq"], amp={"model": 1, "gain": 0.5})
-    pr.eng.G[D.G_CABPOS] = 1
-    pr.eng.set_ir(IRL.make_cab("2x12 Warm Dark", "RIBBON", 0.4, 0.4, sr=SR), "tgt")
+    # ---- Low/High Cut still sits cleanly in the chain with the cab
+    pr = fresh_probe(["cut", "amp"], amp={"model": 1, "gain": 0.5}, cut={"hpf": 400})
+    pr.eng.set_ir(IRL.make_cab("4x12 Closed British", sr=SR), "t")
     pr.eng.G[D.G_CAB] = 2
-    pr.eng.set("amp", "bass", 0.85)
-    pr.eng.set("amp", "treble", 0.2)
-    pr.eng.set("amp", "mid", 0.7)
-    pr.eng.set("cut", "lpf", 4200)
-    L, R = pr.render(riff, skip=int(0.3 * SR))
-    target = A.curve_on_bands(A.welch_db(0.5 * (L + R), SR))
-    pr2 = fresh_probe(["amp", "cut", "eq"], amp={"model": 1, "gain": 0.5})
-    pr2.eng.G[D.G_CABPOS] = 1
-    t0 = time.time()
-    res = A.match_tone(pr2, target, riff)
-    dt = time.time() - t0
-    check("tone match reduces spectral error a lot", res["after"] < 0.4 * res["before"] and res["after"] < 2.5,
-          f"{res['before']:.2f} -> {res['after']:.2f} dB RMS in {dt:.0f} s, cab {res['cab']['cab']} / {res['cab']['mic']}")
+    L, _ = pr.render(riff, skip=SR // 2)
+    check("cut + amp + cab renders finite output", np.isfinite(L).all() and np.abs(L).max() > 1e-3)
 
     print(f"\n{sum(RESULTS)}/{len(RESULTS)} checks passed")
     return 0 if all(RESULTS) else 1

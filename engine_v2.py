@@ -123,8 +123,6 @@ class AudioEngine:
         self.dryR = np.zeros(16384)
         self.tuner_buf = np.zeros(TUNER_LEN)
         self.tuner_w = 0
-        self.out_buf = np.zeros(TUNER_LEN)       # post-chain mono ring buffer (spectrum analyzer)
-        self.out_w = 0
         self.raw_peak = 0.0                      # peak of the raw input since the UI last reset it
         self.stream = None
         self.xruns = 0
@@ -356,10 +354,6 @@ class AudioEngine:
         w = self.tuner_w
         return np.concatenate((self.tuner_buf[w:], self.tuner_buf[:w]))
 
-    def out_snapshot(self):
-        w = self.out_w
-        return np.concatenate((self.out_buf[w:], self.out_buf[:w]))
-
     def latency_info(self):
         """Driver-reported latencies in ms: (input, output, buffer) or None when stopped."""
         s = self.stream
@@ -500,13 +494,6 @@ class AudioEngine:
         if chunk is not None and self.player_mode == "through":
             L[:frames] += chunk.mean(axis=1)          # re-amp a recorded DI through the board
         self._run(frames)
-        if frames <= TUNER_LEN:                       # analyzer ring buffer (what the chain produced)
-            w = self.out_w
-            k = min(frames, TUNER_LEN - w)
-            self.out_buf[w:w + k] = 0.5 * (L[:k] + self.R[:k])
-            if k < frames:
-                self.out_buf[:frames - k] = 0.5 * (L[k:frames] + self.R[k:frames])
-            self.out_w = (w + frames) % TUNER_LEN
         tap = self.tap
         if tap is not None:                           # PC audio (virtual cable) mixes in after the pedals
             t = tap.read(frames)
