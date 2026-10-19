@@ -66,6 +66,12 @@ PEDALS = [
               Param("gain", "Boost", 0, 24, 8, "{:+.0f} dB", conv=db),
               Param("tone", "Tone", -12, 12, 2, "{:+.0f} dB", conv=bell),
           ], ink="#a5d6a7", text="#e8f5e9"),
+    Pedal("cut", D.T_CUT, "LOW/HIGH CUT", "#455a64", "Filter",
+          "Steep high-pass and low-pass: trim flubby lows and fizzy highs", [
+              Param("hpf", "Low Cut", 20, 500, 80, "{:.0f} Hz", log=True),
+              Param("lpf", "High Cut", 1500, 16000, 6000, "{:.0f} Hz", log=True),
+              Choice("slope", "Slope", ["12 dB", "24 dB"], default=1),
+          ], ink="#b0bec5", text="#eceff1"),
     Pedal("octave", D.T_OCTAVE, "OCTAVER", "#7e57c2", "Pitch", "Analog-style sub octaves + octave up", [
         Param("dry", "Dry", 0, 1, 1.0),
         Param("sub1", "Oct -1", 0, 1, 0.7),

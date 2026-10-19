@@ -50,10 +50,11 @@ T_MZONE = 29
 T_TBOOST = 30
 T_DOUBLER = 31
 T_DRUMS = 32
-N_TYPES = 33
+T_CUT = 33
+N_TYPES = 34
 
 # 0 = mono, 1 = stereo (crossfaded bypass), 2 = stereo, handles its own bypass (tails)
-KIND = np.array([0] * 18 + [1, 1, 1, 1, 2, 2, 2] + [0] + [0, 0, 0, 0, 0, 1, 2], dtype=np.int64)
+KIND = np.array([0] * 18 + [1, 1, 1, 1, 2, 2, 2] + [0] + [0, 0, 0, 0, 0, 1, 2] + [0], dtype=np.int64)
 S_DRUM_STEP = 20
 
 # ---- global params / state ----
@@ -1152,6 +1153,29 @@ def tboost(x, n, p, s, mem, sr):
 
 
 @njit(cache=True)
+def cut(x, n, p, s, mem, sr):
+    """High-pass + low-pass filter, 12 or 24 dB/oct: trims flub below and fizz above."""
+    gh, gl = _g(p[1], sr), _g(p[2], sr)
+    steep = p[3] > 0.5
+    k1 = 1.848 if steep else 1.414     # 4th-order Butterworth = two sections, Q 0.541 and 1.307
+    k2 = 0.765
+    h1, h2, h3, h4, l1, l2, l3, l4 = s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8]
+    for i in range(n):
+        bp, lp, h1, h2 = _svf(x[i], gh, k1, h1, h2)
+        v = x[i] - k1 * bp - lp
+        if steep:
+            bp, lp, h3, h4 = _svf(v, gh, k2, h3, h4)
+            v = v - k2 * bp - lp
+        bp, lp, l1, l2 = _svf(v, gl, k1, l1, l2)
+        v = lp
+        if steep:
+            bp, lp, l3, l4 = _svf(v, gl, k2, l3, l4)
+            v = lp
+        x[i] = v
+    s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8] = h1, h2, h3, h4, l1, l2, l3, l4
+
+
+@njit(cache=True)
 def doubler(L, R, n, p, s, mem, sr):
     """Fake double-tracking: two slightly different, slowly drifting takes panned apart."""
     base = max(p[1] * sr, 0.006 * sr)
@@ -1332,6 +1356,8 @@ def _mono(t, x, n, p, s, mem, sr):
         mzone(x, n, p, s, mem, sr)
     elif t == T_TBOOST:
         tboost(x, n, p, s, mem, sr)
+    elif t == T_CUT:
+        cut(x, n, p, s, mem, sr)
 
 
 @njit(cache=True)

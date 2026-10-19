@@ -17,6 +17,7 @@ from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 
 import app_v2
+import pcaudio_v3
 import updater
 import widgets_v3 as W
 from version import VERSION
@@ -289,6 +290,67 @@ class App(app_v2.App):
             w.lift(self.audio_panel)        # created before the container, so raise them above it
         self.transport.pack_configure(padx=16, pady=(4, 6))
         self.audio_open = True
+        self._build_pc_audio()
+
+    # ---------------------------------------------------------------- PC audio (virtual cable)
+    def _build_pc_audio(self):
+        """Second row under the player: route anything playing on the PC into the output."""
+        self.tap = pcaudio_v3.PCAudioTap()
+        self.tap.vol = float(self.settings.get("tap_vol", 0.8))
+        row = tk.Frame(self.transport.master, bg="#1f1f25")
+        row.pack(fill="x", padx=16, pady=(0, 6), after=self.transport)
+        tk.Label(row, text="PC AUDIO", bg="#1f1f25", fg=TEXT, font=("Segoe UI", 8, "bold")).pack(side="left", padx=(8, 4))
+        self.tap_btn = self._btn(row, "Off", self.toggle_tap)
+        self.tap_btn.pack(side="left", padx=2, pady=3)
+        self.tap_lbl = tk.Label(row, text="play anything on this PC and hear it here, mixed with your guitar",
+                                bg="#1f1f25", fg=DIM, font=("Segoe UI", 8), anchor="w")
+        self.tap_lbl.pack(side="left", padx=6)
+        self.tapvol_var = tk.DoubleVar(value=self.tap.vol)
+        ttk.Scale(row, from_=0.0, to=1.5, variable=self.tapvol_var, length=90,
+                  command=lambda *_: setattr(self.tap, "vol", float(self.tapvol_var.get()))).pack(side="right", padx=8)
+        tk.Label(row, text="Vol", bg="#1f1f25", fg=DIM, font=("Segoe UI", 8)).pack(side="right")
+        self.engine.tap = self.tap
+        self.root.after(300, self._tap_tick)
+
+    def toggle_tap(self):
+        if self.tap.running:
+            self.tap.stop()
+            self._tap_view()
+            return
+        try:
+            self.tap.start(self.engine.sr)
+        except Exception as e:   # noqa: BLE001
+            messagebox.showerror("PC audio", str(e), parent=self.root)
+            return
+        self._tap_view()
+        if not self.settings.get("tap_help_seen"):
+            self.settings["tap_help_seen"] = True
+            messagebox.showinfo("PC audio", "Now tell Windows to play your music into the cable:\n\n"
+                                "Settings > System > Sound > Volume mixer, then set the Output device of "
+                                "your browser / music app to “CABLE Input (VB-Audio Virtual Cable)”.\n\n"
+                                "The music then plays only through PedalBoard (and your Scarlett's outputs). "
+                                "The dot lights up green when sound arrives.", parent=self.root)
+
+    def _tap_view(self):
+        on = self.tap.running
+        self.tap_btn.configure(text="On" if on else "Off", bg="#2e7d32" if on else "#3a3a42")
+        self.tap_lbl.configure(text=f"listening to {self.tap.device_name}" if on else
+                               "play anything on this PC and hear it here, mixed with your guitar")
+
+    def _tap_tick(self):
+        t = self.tap
+        if t.running:
+            if t.sr != self.engine.sr:                     # audio restarted at another sample rate
+                try:
+                    t.start(self.engine.sr)
+                except Exception:   # noqa: BLE001
+                    t.stop()
+                    self._tap_view()
+            live = t.peak > 0.002
+            self.tap_lbl.configure(fg="#5dd36b" if live else DIM,
+                                   text=f"{'● ' if live else '○ '}listening to {t.device_name}"
+                                   + ("" if live else " - no sound yet, check the Volume mixer output"))
+        self.root.after(300, self._tap_tick)
 
     def toggle_audio_panel(self):
         if self.audio_open:
@@ -446,6 +508,8 @@ class App(app_v2.App):
 
     def on_close(self):
         self.settings["audio_collapsed"] = not self.audio_open
+        self.settings["tap_vol"] = float(self.tapvol_var.get())
+        self.tap.stop()
         super().on_close()
 
 

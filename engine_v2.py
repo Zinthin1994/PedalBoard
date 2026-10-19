@@ -143,6 +143,7 @@ class AudioEngine:
         self.player_loop = True
         self.player_mode = "backing"
         self.player_vol = 0.7
+        self.tap = None              # optional PCAudioTap, see pcaudio_v3.py
         self.rec_out = None          # lists of blocks while recording
         self.rec_di = None
         self.rec_frames = 0
@@ -447,6 +448,14 @@ class AudioEngine:
         if chunk is not None and self.player_mode == "through":
             L[:frames] += chunk.mean(axis=1)          # re-amp a recorded DI through the board
         self._run(frames)
+        tap = self.tap
+        if tap is not None:                           # PC audio (virtual cable) mixes in after the pedals
+            t = tap.read(frames)
+            if t is not None:
+                L[:frames] += t[:, 0]
+                self.R[:frames] += t[:, 1]
+                np.clip(L[:frames], -1.0, 1.0, out=L[:frames])
+                np.clip(self.R[:frames], -1.0, 1.0, out=self.R[:frames])
         if chunk is not None and self.player_mode == "backing":
             L[:frames] += chunk[:, 0]
             self.R[:frames] += chunk[:, 1]

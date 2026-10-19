@@ -42,5 +42,6 @@ tagged `v<version>`.
 | `engine_v2.py` | audio I/O, IR loader, player, recorder |
 | `app_v2.py` | app logic (presets, MIDI, looper, keys) |
 | `app_v3.py`, `widgets_v3.py` | the UI |
+| `pcaudio_v3.py` | PC audio tap: captures a virtual cable so any PC sound mixes into the output |
 | `updater.py`, `launch.py`, `version.py` | self-update |
 | `tests/offline_test_v2.py` | offline DSP tests |
