@@ -5,6 +5,10 @@ other end ("CABLE Output") as a second input stream and the engine mixes it into
 to the guitar. The two devices run on different clocks, so the ring buffer is read at a slightly
 adjusted rate to keep its fill level steady instead of slowly under- or over-running.
 """
+import os
+
+os.environ.setdefault("SD_ENABLE_ASIO", "1")   # must precede the sounddevice import (engine_v2 does the same)
+
 import numpy as np
 import sounddevice as sd
 
