@@ -204,7 +204,7 @@ def main():
     eng.load_ir(os.path.join(tmp, "delta.wav"))
     eng.set_global(cab=2)
     got, _, _ = render(eng, sig)
-    err = np.max(np.abs(ref * 1.6 - got))      # load_ir applies +4 dB (x1.6) makeup
+    err = np.max(np.abs(ref - got))            # v4: IRs are level-matched on their 300 Hz-3 kHz mean (delta = 0 dB)
     print(f"    IR delta identity max err = {err:.2e}")
     ok &= err < 1e-5
     # realistic-length IR (decaying filtered noise) for CPU cost

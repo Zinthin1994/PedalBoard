@@ -12,8 +12,8 @@ os.chdir(HERE)
 def main():
     import updater
     try:
-        import app_v3
-        app_v3.main()
+        import app_v4
+        app_v4.main()
     except Exception:   # noqa: BLE001
         err = traceback.format_exc()
         with open(os.path.join(HERE, "pedalboard-error.log"), "a", encoding="utf-8") as f:

@@ -17,3 +17,10 @@ __pycache__/
 *.nbi
 *.nbc
 tests/out*/
+
+# v4 personal data
+snapshots*.json
+irs/
+
+# local backups
+backup_*/

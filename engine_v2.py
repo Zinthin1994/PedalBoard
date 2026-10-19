@@ -123,6 +123,9 @@ class AudioEngine:
         self.dryR = np.zeros(16384)
         self.tuner_buf = np.zeros(TUNER_LEN)
         self.tuner_w = 0
+        self.out_buf = np.zeros(TUNER_LEN)       # post-chain mono ring buffer (spectrum analyzer)
+        self.out_w = 0
+        self.raw_peak = 0.0                      # peak of the raw input since the UI last reset it
         self.stream = None
         self.xruns = 0
         self.late = 0
@@ -135,6 +138,7 @@ class AudioEngine:
         self.chain = (np.zeros(D.N_TYPES, dtype=np.int64), 0)
         self.ir_path = None
         self.ir_name = ""
+        self.ir_source = None        # callable(sr) -> impulse response array, for generated cabinets
         # file player: "backing" mixes into the output, "through" feeds the pedals (re-amping)
         self.player_path = None
         self.player_data = None
@@ -175,7 +179,12 @@ class AudioEngine:
         self.IR = np.zeros(self.irM)
         self.HIST = np.zeros(4 * self.irM)
         self.G[D.G_IR_LEN] = 0
-        if self.ir_path:                     # re-resample files for the new rate
+        if self.ir_source is not None:       # regenerate a synthesized cabinet for the new rate
+            try:
+                self.set_ir(self.ir_source(sr), self.ir_name, source=self.ir_source)
+            except Exception:   # noqa: BLE001
+                self.clear_ir()
+        elif self.ir_path:                   # re-resample files for the new rate
             try:
                 self.load_ir(self.ir_path)
             except Exception:   # noqa: BLE001
@@ -213,8 +222,13 @@ class AudioEngine:
 
     # ---- cabinet impulse response
     def load_ir(self, path):
-        h = read_wav(path, self.sr)[:, 0]
-        nz = np.nonzero(np.abs(h) > 1e-4 * np.abs(h).max())[0]
+        self.set_ir(read_wav(path, self.sr)[:, 0], os.path.basename(path))
+        self.ir_path = path
+
+    def set_ir(self, h, name, source=None):
+        """Install an impulse response (float array at the engine's sample rate)."""
+        h = np.asarray(h, dtype=np.float64)
+        nz = np.nonzero(np.abs(h) > 1e-4 * np.abs(h).max())[0] if len(h) else []
         if len(nz) == 0:
             raise ValueError("The impulse response is silent.")
         h = h[nz[0]:]                                 # drop leading silence (= latency)
@@ -222,18 +236,36 @@ class AudioEngine:
         h = h[:n].copy()
         fade = max(1, n // 10)
         h[n - fade:] *= np.linspace(1.0, 0.0, fade)   # avoid a truncation click
-        h *= 1.6 / np.abs(np.fft.rfft(h, 8192)).max()  # +4 dB at the loudest frequency ~ level-matched
+        # level-match cabinets by their average response over the guitar's core range (300 Hz - 3 kHz),
+        # so swapping cabs changes tone, not loudness
+        mag = np.abs(np.fft.rfft(h, 8192))
+        f = np.fft.rfftfreq(8192, 1.0 / self.sr)
+        band = (f >= 300.0) & (f <= 3000.0)
+        h *= 1.0 / np.exp(np.mean(np.log(mag[band] + 1e-9)))
         self.G[D.G_IR_LEN] = 0                        # stop using it while we swap
         self.IR[:] = 0.0
         self.IR[:n] = h[::-1]
         self.G[D.G_IR_LEN] = n
-        self.ir_path = path
-        self.ir_name = os.path.basename(path)
+        self.ir_path = None
+        self.ir_name = name
+        self.ir_source = source
+
+    def ir_response(self, points=256):
+        """Magnitude response (dB) of the installed IR on a log frequency axis, or None."""
+        n = int(self.G[D.G_IR_LEN])
+        if n <= 0:
+            return None
+        h = self.IR[:n][::-1]
+        mag = np.abs(np.fft.rfft(h, 8192))
+        f = np.fft.rfftfreq(8192, 1.0 / self.sr)
+        fx = np.geomspace(40.0, 12000.0, points)
+        return fx, 20.0 * np.log10(np.interp(fx, f, mag) + 1e-9)
 
     def clear_ir(self):
         self.G[D.G_IR_LEN] = 0
         self.ir_path = None
         self.ir_name = ""
+        self.ir_source = None
 
     # ---- file player
     def load_player(self, path):
@@ -293,11 +325,13 @@ class AudioEngine:
                 done(err)
         threading.Thread(target=work, daemon=True).start()
 
-    def set_global(self, in_gain_db=None, cab=None, master_db=None, mute=None):
+    def set_global(self, in_gain_db=None, cab=None, master_db=None, mute=None, cabpos=None):
         if in_gain_db is not None:
             self.G[D.G_IN_GAIN] = 10 ** (in_gain_db / 20)
         if cab is not None:
             self.G[D.G_CAB] = float(cab)
+        if cabpos is not None:
+            self.G[D.G_CABPOS] = float(cabpos)
         if master_db is not None:
             self.G[D.G_MASTER] = 10 ** (master_db / 20)
         if mute is not None:
@@ -321,6 +355,21 @@ class AudioEngine:
     def tuner_snapshot(self):
         w = self.tuner_w
         return np.concatenate((self.tuner_buf[w:], self.tuner_buf[:w]))
+
+    def out_snapshot(self):
+        w = self.out_w
+        return np.concatenate((self.out_buf[w:], self.out_buf[:w]))
+
+    def latency_info(self):
+        """Driver-reported latencies in ms: (input, output, buffer) or None when stopped."""
+        s = self.stream
+        if s is None:
+            return None
+        try:
+            bs = s.blocksize or 0
+            return s.latency[0] * 1000.0, s.latency[1] * 1000.0, 1000.0 * bs / s.samplerate
+        except Exception:   # noqa: BLE001
+            return None
 
     @property
     def running(self):
@@ -441,6 +490,9 @@ class AudioEngine:
             if k < frames:
                 self.tuner_buf[:frames - k] = L[k:frames]
             self.tuner_w = (w + frames) % TUNER_LEN
+        pk = float(np.abs(L[:frames]).max()) if frames else 0.0
+        if pk > self.raw_peak:
+            self.raw_peak = pk
         rec_di = self.rec_di
         if rec_di is not None:
             rec_di.append(L[:frames].astype(np.float32))
@@ -448,6 +500,13 @@ class AudioEngine:
         if chunk is not None and self.player_mode == "through":
             L[:frames] += chunk.mean(axis=1)          # re-amp a recorded DI through the board
         self._run(frames)
+        if frames <= TUNER_LEN:                       # analyzer ring buffer (what the chain produced)
+            w = self.out_w
+            k = min(frames, TUNER_LEN - w)
+            self.out_buf[w:w + k] = 0.5 * (L[:k] + self.R[:k])
+            if k < frames:
+                self.out_buf[:frames - k] = 0.5 * (L[k:frames] + self.R[k:frames])
+            self.out_w = (w + frames) % TUNER_LEN
         tap = self.tap
         if tap is not None:                           # PC audio (virtual cable) mixes in after the pedals
             t = tap.read(frames)

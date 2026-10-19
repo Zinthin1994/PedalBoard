@@ -141,8 +141,9 @@ PEDALS = [
         Param("b8k", "8k", -12, 12, 0, "{:+.0f}", conv=bell),
         Param("level", "Level", -12, 12, 0, "{:+.0f} dB", conv=db),
     ]),
-    Pedal("amp", D.T_AMP, "AMP", "#3e2723", "Amp", "Tube amp: clean / crunch / lead channels with tone stack", [
-        Choice("model", "Channel", ["CLEAN", "CRUNCH", "LEAD", "METAL"], default=1),
+    Pedal("amp", D.T_AMP, "AMP", "#3e2723", "Amp", "Tube preamp + power amp + tone stack, 8 voicings", [
+        Choice("model", "Voicing", ["CLEAN", "CRUNCH", "LEAD", "METAL", "PLEXI", "BLACKFACE", "CHIME", "MODERN"],
+               default=1),
         Param("gain", "Gain", 0, 1, 0.5),
         Param("bass", "Bass", 0, 1, 0.5),
         Param("mid", "Middle", 0, 1, 0.5),

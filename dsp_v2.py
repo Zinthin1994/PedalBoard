@@ -63,7 +63,9 @@ G_CAB = 1          # 0 off, 1 basic filter cab, 2 impulse response
 G_MASTER = 2
 G_MUTE = 3
 G_IR_LEN = 4       # taps of the loaded impulse response (0 = none)
-N_G = 5
+G_CABPOS = 5       # 0 = cabinet at the very end of the chain, 1 = right after the AMP slot
+#                    (only matters for non-linear / modulated blocks after the amp; linear ones commute)
+N_G = 6
 
 IR_SECONDS = 0.0215   # longest IR used (cab IRs carry almost everything in ~20 ms)
 
@@ -440,15 +442,24 @@ def dist(x, n, p, s, mem, sr):
     s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8] = hp_s, xp, Fp, dc, t1, t2, m1, m2
 
 
-# amp models:        clean   crunch  lead    metal
-AMP_IN_HP = (60.0, 90.0, 150.0, 210.0)       # input coupling (tightness)
-AMP_GMIN = (1.0, 2.0, 6.0, 12.0)
-AMP_GMAX = (14.0, 80.0, 500.0, 1400.0)
-AMP_STAGES = (1, 2, 3, 4)                    # cascaded triode stages
-AMP_SG = (1.0, 5.0, 8.0, 6.0)                # gain between stages
-AMP_BIAS = (0.08, 0.15, 0.2, 0.12)           # stage asymmetry (even harmonics)
-AMP_LP = (7500.0, 6000.0, 5000.0, 4600.0)    # per-stage Miller roll-off
-AMP_OUT = (0.22, 0.12, 0.1, 0.09)            # roughly level-matched to bypass
+# amp models:        clean   crunch  lead    metal   plexi   blackf  chime   modern
+AMP_IN_HP = (60.0, 90.0, 150.0, 210.0, 80.0, 70.0, 100.0, 180.0)      # input coupling (tightness)
+AMP_GMIN = (1.0, 2.0, 6.0, 12.0, 3.0, 1.0, 2.0, 8.0)
+AMP_GMAX = (14.0, 80.0, 500.0, 1400.0, 150.0, 9.0, 45.0, 900.0)
+AMP_STAGES = (1, 2, 3, 4, 2, 1, 2, 4)                                  # cascaded triode stages
+AMP_SG = (1.0, 5.0, 8.0, 6.0, 6.0, 1.0, 3.5, 6.5)                      # gain between stages
+AMP_BIAS = (0.08, 0.15, 0.2, 0.12, 0.12, 0.06, 0.2, 0.1)               # stage asymmetry (even harmonics)
+AMP_LP = (7500.0, 6000.0, 5000.0, 4600.0, 6500.0, 8500.0, 8000.0, 5200.0)   # per-stage Miller roll-off
+AMP_OUT = (0.22, 0.12, 0.1, 0.09, 0.11, 0.25, 0.13, 0.13)           # roughly level-matched to bypass
+# tone stack voicing: corner frequencies of the bass shelf / mid bell / treble shelf (Hz), the fixed
+# bass / mid / treble contours (dB, negative = cut) and how soft the power amp is (sag)
+AMP_FB = (120.0, 120.0, 120.0, 120.0, 100.0, 100.0, 160.0, 90.0)
+AMP_FM = (650.0, 650.0, 650.0, 650.0, 750.0, 500.0, 900.0, 520.0)
+AMP_FT = (2800.0, 2800.0, 2800.0, 2800.0, 3200.0, 3500.0, 3800.0, 3000.0)
+AMP_MIDC = (0.0, 0.0, 0.0, 0.0, 6.0, -8.0, 3.0, -8.0)
+AMP_BASSC = (0.0, 0.0, 0.0, 0.0, -4.0, 1.0, -7.0, 3.0)
+AMP_TREBC = (0.0, 0.0, 0.0, 0.0, 2.5, 3.0, 5.0, 2.0)
+AMP_SAGK = (0.4, 0.4, 0.4, 0.4, 0.4, 0.2, 0.5, 0.9)
 # amp state: 1 input hp, 2..17 four stages x (xp, Fp, coupling, lowpass),
 # 20..25 tone stack, 26..27 presence, 28 sag, 29..30 depth
 
@@ -457,18 +468,19 @@ AMP_OUT = (0.22, 0.12, 0.1, 0.09)            # roughly level-matched to bypass
 def amp(x, n, p, s, mem, sr):
     """Tube amp: cascaded asymmetric triode stages -> passive-style tone stack
     (bass shelf, mid bell, treble shelf) -> saggy power amp -> presence."""
-    model = min(3, max(0, int(p[1] + 0.5)))
+    model = min(7, max(0, int(p[1] + 0.5)))
     nst = AMP_STAGES[model]
     G = AMP_GMIN[model] * (AMP_GMAX[model] / AMP_GMIN[model]) ** p[2]
     sg, bias = AMP_SG[model], AMP_BIAS[model]
+    sagk = AMP_SAGK[model]
     Ghp, Gcc, Glp = _G1(AMP_IN_HP[model], sr), _G1(25.0, sr), _G1(AMP_LP[model], sr)
-    Ab = 10.0 ** ((p[3] - 0.5) * 24.0 / 40.0)
-    Am = 10.0 ** ((p[4] - 0.5) * 24.0 / 40.0)
-    At = 10.0 ** ((p[5] - 0.5) * 24.0 / 40.0)
+    Ab = 10.0 ** ((p[3] - 0.5) * 24.0 / 40.0 + AMP_BASSC[model] / 40.0)
+    Am = 10.0 ** ((p[4] - 0.5) * 24.0 / 40.0 + AMP_MIDC[model] / 40.0)
+    At = 10.0 ** ((p[5] - 0.5) * 24.0 / 40.0 + AMP_TREBC[model] / 40.0)
     Ap = 10.0 ** (p[6] * 12.0 / 40.0)
-    gb, kb = _g(120.0, sr) / math.sqrt(Ab), 1.0 / 0.7
-    gm, km = _g(650.0, sr), 1.0 / (0.8 * Am)
-    gt, kt = _g(2800.0, sr) * math.sqrt(At), 1.0 / 0.7
+    gb, kb = _g(AMP_FB[model], sr) / math.sqrt(Ab), 1.0 / 0.7
+    gm, km = _g(AMP_FM[model], sr), 1.0 / (0.8 * Am)
+    gt, kt = _g(AMP_FT[model], sr) * math.sqrt(At), 1.0 / 0.7
     gp, kp = _g(4000.0, sr) * math.sqrt(Ap), 1.0 / 0.7
     out = p[7] * AMP_OUT[model]
     Ad = 10.0 ** (p[8] * 12.0 / 40.0)                       # depth: power-amp low resonance
@@ -503,7 +515,7 @@ def amp(x, n, p, s, mem, sr):
         a = abs(u)                                               # power amp sag
         c = ea if a > sag else er
         sag = c * sag + (1.0 - c) * a
-        y = math.tanh(1.5 * u / (1.0 + 0.4 * sag))
+        y = math.tanh(1.5 * u / (1.0 + sagk * sag))
         bp, lp, d1, d2 = _svf(y, gd, kd, d1, d2)                 # depth
         y = y + kd * (Ad * Ad - 1.0) * bp
         bp, lp, q1, q2 = _svf(y, gp, kp, q1, q2)                 # presence
@@ -1425,6 +1437,29 @@ def _fir(x, n, hrev, ln, hist, M, w):
     return w
 
 
+@njit(cache=True)
+def _cab_stage(L, R, n, stereo, G, GS, IR, HIST, sr):
+    """The speaker cabinet: OFF, the basic filter cab, or the loaded impulse response."""
+    cab_mode = int(G[G_CAB] + 0.5)
+    irlen = int(G[G_IR_LEN])
+    M = len(HIST) // 4
+    if cab_mode == 2 and 0 < irlen <= M:
+        w = int(GS[GS_IR_W])
+        w2 = _fir(L, n, IR, irlen, HIST[0:2 * M], M, w)
+        if stereo:
+            _fir(R, n, IR, irlen, HIST[2 * M:4 * M], M, w)
+        else:
+            R[:n] = L[:n]
+        GS[GS_IR_W] = w2
+    else:
+        cab_on = cab_mode >= 1          # IR mode without an IR falls back to the basic cab
+        _cab(L, n, cab_on, GS[GS_CAB_L:GS_CAB_L + 9], sr)
+        if stereo:
+            _cab(R, n, cab_on, GS[GS_CAB_R:GS_CAB_R + 9], sr)
+        else:
+            R[:n] = L[:n]
+
+
 @njit(cache=True, nogil=True)     # releases the GIL so the UI can't stall the DSP
 def run_chain(L, R, n, order, nord, P, S, MEM, MEMOFF, MEMLEN, G, GS, dryL, dryR, wasst,
               IR, HIST, sr):
@@ -1444,7 +1479,16 @@ def run_chain(L, R, n, order, nord, P, S, MEM, MEMOFF, MEMLEN, G, GS, dryL, dryR
 
     ax = _op(0.01, sr)
     stereo = False
+    cab_at = nord                      # the cabinet runs just before this slot (nord = after the last)
+    if G[G_CABPOS] > 0.5:
+        for j in range(nord):
+            if order[j] == T_AMP:
+                cab_at = j + 1
+    cab_done = False
     for j in range(nord):
+        if j == cab_at:
+            _cab_stage(L, R, n, stereo, G, GS, IR, HIST, sr)
+            cab_done = True
         t = order[j]
         p = P[t * PST:(t + 1) * PST]
         sb = t * 2 * SST
@@ -1493,24 +1537,10 @@ def run_chain(L, R, n, order, nord, P, S, MEM, MEMOFF, MEMLEN, G, GS, dryL, dryR
                 R[i] = dryR[i] + mix * (R[i] - dryR[i])
         sL[0] = mix
 
-    cab_mode = int(G[G_CAB] + 0.5)
-    irlen = int(G[G_IR_LEN])
-    M = len(HIST) // 4
-    if cab_mode == 2 and 0 < irlen <= M:
-        w = int(GS[GS_IR_W])
-        w2 = _fir(L, n, IR, irlen, HIST[0:2 * M], M, w)
-        if stereo:
-            _fir(R, n, IR, irlen, HIST[2 * M:4 * M], M, w)
-        else:
-            R[:n] = L[:n]
-        GS[GS_IR_W] = w2
-    else:
-        cab_on = cab_mode >= 1          # IR mode without an IR falls back to the basic cab
-        _cab(L, n, cab_on, GS[GS_CAB_L:GS_CAB_L + 9], sr)
-        if stereo:
-            _cab(R, n, cab_on, GS[GS_CAB_R:GS_CAB_R + 9], sr)
-        else:
-            R[:n] = L[:n]
+    if not cab_done:
+        _cab_stage(L, R, n, stereo, G, GS, IR, HIST, sr)
+    if not stereo:
+        R[:n] = L[:n]
 
     mt = 0.0 if G[G_MUTE] > 0.5 else G[G_MASTER]
     m = GS[GS_MASTER]
